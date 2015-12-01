@@ -1,0 +1,183 @@
+#!/bin/bash
+
+#
+# chkconfig: 345 90 12
+# description: MySQL binary log streamer
+#
+
+CONFIG_FILE=/etc/binlog-streaming.cfg
+
+. /etc/init.d/functions
+
+if [ ! -f $CONFIG_FILE ]
+then
+  echo "$CONFIG_FILE not found !"
+  exit 1
+fi
+
+. $CONFIG_FILE
+
+
+function check_directories() {
+  if [ ! -d $backup_folder=  ]
+  then
+    mkdir -p $backup_folder  
+    if [ $? -ne 0 ]
+    then
+      echo "Failed to create directory ${backup_folder} for the streamed binary logs."
+      failure
+      echo
+    fi
+  fi
+}
+
+function stream_binlogs() {
+   cd $backup_folder
+   if [ "x$password" == "x" ]
+   then
+     passwd=""
+   else
+     passwd="-p${password}"
+   fi
+   # get the last binary log we have locally
+   lastbin=$(ls --sort=time  ${backup_folder} | head -n 1)
+   if [ "x$lastbin" != "x" ]
+   then 
+     # check if that binlog is still on the server
+     echo on this host the last binary log is $lastbin
+     mysql -BN --host=${master} -u $user $passwd -e "show binary logs" | grep $lastbin >/dev/null
+     if [ $? -ne 0 ]
+     then
+       # it is not there anymore, lets start from the first availalble one
+       echo "$lastbin not available on the server anymore"     
+       lastbin=$(mysql -BN --host=${master} -u $user $passwd  -e "show binary logs" | head -n1 | cut  -f1) 
+     fi
+   else
+       lastbin=$(mysql -BN --host=${master} -u $user $passwd  -e "show binary logs" | head -n1 | cut  -f1) 
+   fi      
+   echo starting from $lastbin ... 
+   $mysqlbinlog56_bin --read-from-remote-server --host=$master --user=$user $passwd --raw --stop-never --result-file=${backup_folder}/ $lastbin >/dev/null 2>&1 & 
+   echo $! > $pid_file 
+   disown `cat $pid_file`
+}
+
+
+function check_pid() {
+  kill -s 0 `cat $pid_file`
+  if [ $? -eq 0 ]
+  then
+    success
+    echo
+  else
+    failure
+    echo
+  fi
+}
+
+
+function start() {
+  echo -n $"Starting MySQL binlog streamer "
+  if [ ! -f $pid_file ]
+  then
+    check_directories
+    stream_binlogs
+    check_pid
+    echo
+  else
+    kill -s 0 `cat $pid_file`
+    if [ $? -ne 0 ]
+    then
+      echo -n " (stale pid file removed) "
+      rm -f $pid_file 
+      stream_binlogs
+      check_pid
+    else
+      echo -n " Already running. "
+      failure
+      echo
+    fi
+  fi
+}
+
+function stop() {
+  echo -n $"Stopping MySQL binlog streamer"
+  if [ -f $pid_file ]
+  then
+    kill -15 `cat $pid_file`
+    if [ $? -ne 0 ]
+    then
+      echo -n " Failed to stop. "
+      failure
+      echo
+    fi
+    rm -f $pid_file
+    if [ $? -ne 0 ]
+    then
+      echo -n " Failed to remove pid file. "
+      failure
+      echo
+    fi
+    success
+    echo
+  else
+    echo -n " Already stopped. "
+    failure
+    echo
+  fi
+}
+
+function status() {
+  if [ -f $pid_file ]
+  then
+    kill -s 0 `cat $pid_file`
+    if [ $? -eq 0 ]
+    then
+      echo -n $"Running."
+      success
+      echo
+    else
+      echo -n $"Not running."
+      failure
+      echo
+    fi
+  else
+    echo -n $"Not running."
+    failure
+    echo
+  fi
+}
+
+function restart() {
+  $0 stop
+  $0 start
+}
+
+function usage() {
+  echo "Usage: $0 (start|stop|status|restart)"
+}
+
+if [ $# -ne 1 ]
+then
+  usage
+  exit 1
+fi
+
+case $1 in
+  "start")
+    start
+  ;;
+  "stop")
+    stop
+  ;;
+  "status")
+    status
+  ;;
+  "restart")
+    restart
+  ;;
+  *)
+    usage
+    exit 1
+  ;;
+esac
+
